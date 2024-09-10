@@ -1,0 +1,332 @@
+diff -Naur a/kernel/include/linux/sched.h b/kernel/include/linux/sched.h
+--- a/kernel/include/linux/sched.h	2024-09-10 11:13:34.213119954 +0800
++++ b/kernel/include/linux/sched.h	2024-08-14 16:32:48.697123400 +0800
+@@ -897,6 +897,7 @@
+ 	/* MM fault and swap info: this can arguably be seen as either mm-specific or thread-specific: */
+ 	unsigned long			min_flt;
+ 	unsigned long			maj_flt;
++	unsigned long           swap_flt;
+ 
+ #ifdef CONFIG_POSIX_TIMERS
+ 	struct task_cputime		cputime_expires;
+diff -Naur a/kernel/kernel/fork.c b/kernel/kernel/fork.c
+--- a/kernel/kernel/fork.c	2024-09-10 11:11:33.922148207 +0800
++++ b/kernel/kernel/fork.c	2024-08-14 16:31:46.160198100 +0800
+@@ -1325,6 +1325,7 @@
+ 	int retval;
+ 
+ 	tsk->min_flt = tsk->maj_flt = 0;
++	tsk->swap_flt = 0;
+ 	tsk->nvcsw = tsk->nivcsw = 0;
+ #ifdef CONFIG_DETECT_HUNG_TASK
+ 	tsk->last_switch_count = tsk->nvcsw + tsk->nivcsw;
+diff -Naur a/kernel/mm/memory.c b/kernel/mm/memory.c
+--- a/kernel/mm/memory.c	2024-09-10 11:11:34.702167390 +0800
++++ b/kernel/mm/memory.c	2024-08-14 16:37:23.852255900 +0800
+@@ -3212,9 +3212,10 @@
+ 	 * before page_add_anon_rmap() and swap_free(); try_to_free_swap()
+ 	 * must be called after the swap_free(), or it will never succeed.
+ 	 */
+-
+-	inc_mm_counter_fast(vma->vm_mm, MM_ANONPAGES);
+-	dec_mm_counter_fast(vma->vm_mm, MM_SWAPENTS);
++		
++	inc_mm_counter(vma->vm_mm, MM_ANONPAGES);
++	dec_mm_counter(vma->vm_mm, MM_SWAPENTS);	
++	current->swap_flt++;
+ 	pte = mk_pte(page, vma->vm_page_prot);
+ 	if ((vmf->flags & FAULT_FLAG_WRITE) && reuse_swap_page(page, NULL)) {
+ 		pte = maybe_mkwrite(pte_mkdirty(pte), vma);
+diff -Naur a/kernel/mm/page_alloc.c b/kernel/mm/page_alloc.c
+--- a/kernel/mm/page_alloc.c	2024-09-10 11:11:34.726167980 +0800
++++ b/kernel/mm/page_alloc.c	2024-08-07 11:07:55.407095200 +0800
+@@ -311,7 +311,7 @@
+ 	free_transhuge_page,
+ #endif
+ };
+-
++EXPORT_SYMBOL(compound_page_dtors);
+ /*
+  * Try to keep at least this much lowmem free.  Do not allow normal
+  * allocations below this point, only high priority ones. Automatically
+@@ -2943,6 +2943,7 @@
+ 	free_unref_page_commit(page, pfn);
+ 	local_irq_restore(flags);
+ }
++EXPORT_SYMBOL(free_unref_page);
+ 
+ /*
+  * Free a list of 0-order pages
+@@ -2981,7 +2982,7 @@
+ 	}
+ 	local_irq_restore(flags);
+ }
+-
++EXPORT_SYMBOL(free_unref_page_list);
+ /*
+  * split_page takes a non-compound higher-order page, and splits it into
+  * n (1<<order) sub-pages: page[0..n]
+diff -Naur a/kernel/mm/page_io.c b/kernel/mm/page_io.c
+--- a/kernel/mm/page_io.c	2024-09-10 11:11:34.726167980 +0800
++++ b/kernel/mm/page_io.c	2024-08-13 13:33:38.964781200 +0800
+@@ -289,7 +289,7 @@
+ 			.bv_offset = 0
+ 		};
+ 		struct iov_iter from;
+-
++		
+ 		iov_iter_bvec(&from, ITER_BVEC | WRITE, &bv, 1, PAGE_SIZE);
+ 		init_sync_kiocb(&kiocb, swap_file);
+ 		kiocb.ki_pos = page_file_offset(page);
+diff -Naur a/kernel/mm/rmap.c b/kernel/mm/rmap.c
+--- a/kernel/mm/rmap.c	2024-09-10 11:11:34.734168177 +0800
++++ b/kernel/mm/rmap.c	2024-08-07 13:11:27.430503800 +0800
+@@ -679,7 +679,8 @@
+ 	return false;
+ }
+ #endif /* CONFIG_ARCH_WANT_BATCHED_UNMAP_TLB_FLUSH */
+-
++EXPORT_SYMBOL(try_to_unmap_flush);
++EXPORT_SYMBOL(try_to_unmap_flush_dirty);
+ /*
+  * At what user virtual address is page expected in vma?
+  * Caller should check the page is actually part of the vma.
+@@ -876,6 +877,7 @@
+ 
+ 	return pra.referenced;
+ }
++EXPORT_SYMBOL(page_referenced);
+ 
+ static bool page_mkclean_one(struct page *page, struct vm_area_struct *vma,
+ 			    unsigned long address, void *arg)
+@@ -1738,6 +1740,7 @@
+ 	 */
+ 	return !page_mapcount(page);
+ }
++EXPORT_SYMBOL(try_to_unmap);
+ 
+ /**
+  * try_to_munlock - try to munlock a page
+diff -Naur a/kernel/mm/swap.c b/kernel/mm/swap.c
+--- a/kernel/mm/swap.c	2024-09-10 11:11:34.746168472 +0800
++++ b/kernel/mm/swap.c	2024-08-07 11:13:03.849540700 +0800
+@@ -648,6 +648,7 @@
+ 	lru_add_drain_cpu(get_cpu());
+ 	put_cpu();
+ }
++EXPORT_SYMBOL(lru_add_drain);
+ 
+ #ifdef CONFIG_SMP
+ 
+diff -Naur a/kernel/mm/swapfile.c b/kernel/mm/swapfile.c
+--- a/kernel/mm/swapfile.c	2024-09-10 11:11:34.746168472 +0800
++++ b/kernel/mm/swapfile.c	2024-08-07 11:03:35.955520000 +0800
+@@ -1269,6 +1269,7 @@
+ 	}
+ 	unlock_cluster_or_swap_info(si, ci);
+ }
++EXPORT_SYMBOL(put_swap_page);
+ 
+ #ifdef CONFIG_THP_SWAP
+ int split_swap_cluster(swp_entry_t entry)
+diff -Naur a/kernel/mm/swap_state.c b/kernel/mm/swap_state.c
+--- a/kernel/mm/swap_state.c	2024-09-10 11:11:34.746168472 +0800
++++ b/kernel/mm/swap_state.c	2024-08-07 11:09:28.846267300 +0800
+@@ -197,6 +197,7 @@
+ 	__mod_node_page_state(page_pgdat(page), NR_FILE_PAGES, -nr);
+ 	ADD_CACHE_INFO(del_total, nr);
+ }
++EXPORT_SYMBOL(__delete_from_swap_cache);
+ 
+ /**
+  * add_to_swap - allocate swap space for a page
+@@ -255,7 +256,7 @@
+ 	put_swap_page(page, entry);
+ 	return 0;
+ }
+-
++EXPORT_SYMBOL(add_to_swap);
+ /*
+  * This must be called only on pages that have
+  * been verified to be in the swap cache and locked.
+diff -Naur a/kernel/mm/vmscan.c b/kernel/mm/vmscan.c
+--- a/kernel/mm/vmscan.c	2024-09-10 11:11:34.754168669 +0800
++++ b/kernel/mm/vmscan.c	2024-08-07 17:50:31.309821000 +0800
+@@ -868,6 +868,83 @@
+ }
+ 
+ /*
++ * pageout is called by shrink_page_list() for each dirty page.
++ * Calls ->writepage().
++ */
++int pageout_sync(struct page *page, struct address_space *mapping)
++{
++	/*
++	 * If the page is dirty, only perform writeback if that write
++	 * will be non-blocking.  To prevent this allocation from being
++	 * stalled by pagecache activity.  But note that there may be
++	 * stalls if we need to run get_block().  We could test
++	 * PagePrivate for that.
++	 *
++	 * If this process is currently in __generic_file_write_iter() against
++	 * this page's queue, we can perform writeback even if that
++	 * will block.
++	 *
++	 * If the page is swapcache, write it back even if that would
++	 * block, for some throttling. This happens by accident, because
++	 * swap_backing_dev_info is bust: it doesn't reflect the
++	 * congestion state of the swapdevs.  Easy to fix, if needed.
++	 */
++	if (!is_page_cache_freeable(page))
++		return PAGE_KEEP;
++	if (!mapping) {
++		/*
++		 * Some data journaling orphaned pages can have
++		 * page->mapping == NULL while being dirty with clean buffers.
++		 */
++		if (page_has_private(page)) {
++			if (try_to_free_buffers(page)) {
++				ClearPageDirty(page);
++				pr_info("%s: orphaned page\n", __func__);
++				return PAGE_CLEAN;
++			}
++		}
++		return PAGE_KEEP;
++	}
++	if (mapping->a_ops->writepage == NULL)
++		return PAGE_ACTIVATE;
++	if (!may_write_to_inode(mapping->host, NULL))
++		return PAGE_KEEP;
++
++	if (clear_page_dirty_for_io(page)) {
++		int res;
++		//同步回写1页
++		struct writeback_control wbc = {
++			.sync_mode = WB_SYNC_ALL,
++			.nr_to_write = 1,
++			//.range_start = 0,
++			//.range_end = LLONG_MAX,
++			//.for_reclaim = 1,
++			.for_sync = 1,
++		};
++
++		SetPageReclaim(page);
++		res = mapping->a_ops->writepage(page, &wbc);
++		if (res < 0)
++			handle_write_error(mapping, page, res);
++		if (res == AOP_WRITEPAGE_ACTIVATE) {
++			ClearPageReclaim(page);
++			return PAGE_ACTIVATE;
++		}
++
++		if (!PageWriteback(page)) {
++			/* synchronous write or broken a_ops? */
++			ClearPageReclaim(page);
++		}
++		trace_mm_vmscan_writepage(page);
++		inc_node_page_state(page, NR_VMSCAN_WRITE);
++		return PAGE_SUCCESS;
++	}
++
++	return PAGE_CLEAN;
++}
++EXPORT_SYMBOL(pageout_sync);
++
++/*
+  * Same as remove_mapping, but if the page is removed from the mapping, it
+  * gets returned with a refcount of 0.
+  */
+@@ -910,14 +987,15 @@
+ 		refcount = 1 + HPAGE_PMD_NR;
+ 	else
+ 		refcount = 2;
++	
++	
+ 	if (!page_ref_freeze(page, refcount))
+ 		goto cannot_free;
+-	/* note: atomic_cmpxchg in page_ref_freeze provides the smp_rmb */
++	/* note: atomic_cmpxchg in page_ref_freeze provides the smp_rmb */		
+ 	if (unlikely(PageDirty(page))) {
+ 		page_ref_unfreeze(page, refcount);
+ 		goto cannot_free;
+-	}
+-
++	}		
+ 	if (PageSwapCache(page)) {
+ 		swp_entry_t swap = { .val = page_private(page) };
+ 		mem_cgroup_swapout(page, swap);
+@@ -927,7 +1005,6 @@
+ 	} else {
+ 		void (*freepage)(struct page *);
+ 		void *shadow = NULL;
+-
+ 		freepage = mapping->a_ops->freepage;
+ 		/*
+ 		 * Remember a shadow entry for reclaimed file cache in
+@@ -961,7 +1038,6 @@
+ 	xa_unlock_irqrestore(&mapping->i_pages, flags);
+ 	return 0;
+ }
+-
+ /*
+  * Attempt to detach a locked page from its ->mapping.  If it is dirty or if
+  * someone else has a ref on the page, abort and return 0.  If it was
+@@ -981,7 +1057,7 @@
+ 	}
+ 	return 0;
+ }
+-
++EXPORT_SYMBOL(remove_mapping);
+ /**
+  * putback_lru_page - put previously isolated page onto appropriate LRU list
+  * @page: page to be put back to appropriate lru list
+@@ -996,6 +1072,7 @@
+ 	lru_cache_add(page);
+ 	put_page(page);		/* drop ref from isolate */
+ }
++EXPORT_SYMBOL(putback_lru_page);
+ 
+ enum page_references {
+ 	PAGEREF_RECLAIM,
+@@ -1608,13 +1685,13 @@
+ 
+ 	return ret;
+ }
+-
++EXPORT_SYMBOL(__isolate_lru_page);
+ 
+ /*
+  * Update LRU sizes after isolating pages. The LRU size updates must
+  * be complete before mem_cgroup_update_lru_size due to a santity check.
+  */
+-static __always_inline void update_lru_sizes(struct lruvec *lruvec,
++__always_inline void update_lru_sizes(struct lruvec *lruvec,
+ 			enum lru_list lru, unsigned long *nr_zone_taken)
+ {
+ 	int zid;
+@@ -1630,7 +1707,7 @@
+ 	}
+ 
+ }
+-
++EXPORT_SYMBOL(update_lru_sizes);
+ /*
+  * zone_lru_lock is heavily contended.  Some of the functions that
+  * shrink the lists perform better by taking out a batch of pages
+@@ -1651,6 +1728,7 @@
+  *
+  * returns how many pages were moved onto *@dst.
+  */
++
+ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
+ 		struct lruvec *lruvec, struct list_head *dst,
+ 		unsigned long *nr_scanned, struct scan_control *sc,
+@@ -4180,7 +4258,7 @@
+ 	rcu_read_unlock();
+ 	return ret;
+ }
+-
++EXPORT_SYMBOL(page_evictable);
+ /**
+  * check_move_unevictable_pages - check pages for evictability and move to
+  * appropriate zone lru list
